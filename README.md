@@ -65,7 +65,7 @@ the private key file.
 The plugin needs the app id, the installation id, and the private key path.
 Use one of these two ways.
 
-### Plugin settings
+### Plugin settings, recommended
 
 ```bash
 bb plugin install https://github.com/grrowl/bb-github-app-auth
@@ -76,18 +76,24 @@ bb plugin reload github-app-auth
 bb github-app-auth status
 ```
 
-### The bb server environment
+Plugin settings live on the bb server and never reach an agent's environment.
+The plugin reads them, mints the token, and gives the agent only the token.
+This is the safe place for the credentials.
 
-Leave `appId`, `installationId` and `privateKeyPath` empty in plugin settings.
-The plugin then reads `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and
-`GITHUB_APP_PRIVATE_KEY_PATH` from the bb server's own environment. Set them at
-the global scope in Settings, then Environment variables, or export them in the
-shell that starts the bb server.
+### The bb server launch environment
 
-Use the global scope, not a single project's scope. bb hides a project's
-environment variable values from plugins, so the plugin cannot read app
-credentials that are stored on one project. Project scope is for turning a
-project on, described next, not for holding the credentials.
+You can instead leave `appId`, `installationId` and `privateKeyPath` empty in
+plugin settings. The plugin then reads `GITHUB_APP_ID`,
+`GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the bb
+server process's own environment, which you set by exporting them in the shell
+or launch agent that starts bb.
+
+Do not use the Environment variables settings page for the credentials. A
+value stored on one project is hidden from plugins, so the plugin cannot read
+it. A value stored at the global scope is readable, but bb also copies every
+global value into every agent's environment, so an agent in any project could
+read the private key path and the app id. Keep the credentials in plugin
+settings or the bb server launch environment, where agents never see them.
 
 The private key is read on the bb server machine. Tokens are minted there and
 sent to whichever machine runs the thread, so the key never has to be copied
@@ -115,8 +121,10 @@ already scope secrets in bb.
 
 In Settings, then Environment variables, pick a project from the scope menu,
 add a variable named `GITHUB_APP_ID`, and save. The plugin reads only that the
-name is present, never its value, so the value you store there can be a
-placeholder. Your personal projects never define it, so they never get a token.
+name is set on that project, never its value, so the value you store there can
+be a placeholder. A global variable of the same name does not enable a project,
+so a global credential value never turns projects on. Your personal projects
+never define it, so they never get a token.
 
 ## Settings
 

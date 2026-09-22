@@ -186,8 +186,12 @@ export default async function plugin(bb: BbPluginApi) {
     }
     try {
       const env = await bb.sdk.projects.machineEnvironment({ projectId });
-      const names = [...env.variables, ...env.inheritedVariables];
-      const present = names.some((entry) => entry.name === config.enableEnvVarName);
+      // Only a project-scoped variable enables a project. An inherited global
+      // variable is excluded, so the same name can carry app credentials at
+      // global scope without enabling every project.
+      const present = env.variables.some(
+        (entry) => entry.name === config.enableEnvVarName,
+      );
       envVarProjects.set(projectId, { present, at: Date.now() });
       return present;
     } catch (error) {
