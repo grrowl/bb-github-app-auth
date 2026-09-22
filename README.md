@@ -62,14 +62,10 @@ the private key file.
 
 ## Give the plugin the app credentials
 
-The plugin holds the credentials on the bb server and never sends them to an
-agent. It reads the private key, mints the token, and gives the agent only the
-token. Pick one of the ways below.
+Credentials stay on the bb server. The plugin mints the token and hands the
+agent only the token. Pick one way.
 
 ### One project
-
-This is the way to tie one app to one project. Run this once, from a thread in
-the project or with `--project`:
 
 ```bash
 bb github-app-auth set-app \
@@ -78,18 +74,14 @@ bb github-app-auth set-app \
   --key-path ~/.config/github-apps/my-app.private-key.pem
 ```
 
-The plugin stores the credentials in its own server-side storage, keyed to that
-project. Only that project has them, and no other project or agent can read
-them. A project that has a stored app is enabled on its own, with no list to
-keep. Remove it later with `bb github-app-auth unset-app`.
-
-You cannot store the credentials as a project environment variable. bb hides a
-project's environment variable values from plugins, so the plugin could not
-read them. `set-app` is the project-scoped path that works.
+Targets the current thread's project, or pass `--project`. The credentials are
+stored for that project and enable it on their own. Remove them with
+`bb github-app-auth unset-app`. You cannot store them as a project environment
+variable, because bb hides those values from plugins.
 
 ### A default app for several projects
 
-Set one app in plugin settings, then choose which projects use it.
+Set the default in plugin settings:
 
 ```bash
 bb plugin config github-app-auth set appId 123456
@@ -98,34 +90,25 @@ bb plugin config github-app-auth set privateKeyPath ~/.config/github-apps/my-app
 bb plugin reload github-app-auth
 ```
 
-Choose the projects by name or id:
+Then enable projects, either by listing them:
 
 ```bash
 bb plugin config github-app-auth set projects my-project,another-project
-bb plugin reload github-app-auth
 ```
 
-Or leave the projects setting empty and keep `enableByEnvVar` on, which is the
-default. Then any project that defines a `GITHUB_APP_ID` environment variable
-gets the default app, and any project that does not is left alone. In Settings,
-then Environment variables, pick a project, add a variable named
-`GITHUB_APP_ID`, and save. The plugin reads only that the name is set on that
-project, never its value, so the value can be a placeholder. Your personal
-projects never define it, so they never get a token.
+or by defining a `GITHUB_APP_ID` variable on each project under Settings,
+Environment variables. The plugin checks only that the name is set, so any
+value works. Projects without it get nothing.
 
 ### The bb server launch environment
 
-The default app's credentials can also come from the bb server process's own
-environment, which you set by exporting `GITHUB_APP_ID`,
+Instead of plugin settings, export `GITHUB_APP_ID`,
 `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` in the shell or
-launch agent that starts bb. Leave the three plugin settings empty to use this.
-Do not set them at the global scope on the Environment variables page, because
-bb copies every global value into every agent's environment, and an agent could
-then read the private key path and the app id.
+launch agent that starts bb. Do not set them at global scope on the Environment
+variables page: bb copies global values into every agent, which would expose
+the key path.
 
-The private key is read on the bb server machine. Tokens are minted there and
-sent to whichever machine runs the thread, so the key never has to be copied
-to other machines.
+The private key is read on the bb server, so it never leaves that machine.
 
 ## Settings
 
@@ -158,11 +141,9 @@ A stored project app takes precedence over the default app for that project.
 ## Settings page
 
 Open Settings, then Installed plugins, then GitHub App Auth. The form at the top
-edits the default app, the one every listed project shares. Below it, the GitHub
-Apps by project section shows that default app, then a project dropdown. Pick a
-project to view or edit its own stored app, and Save or Remove it there. This is
-the same per-project storage that `set-app` writes, so a change on either side
-shows on the other.
+edits the default app. Below it, a project dropdown starts at All projects
+(defaults), which shows the default read-only. Pick a project to store or remove
+its own app. It writes the same storage as `set-app`.
 
 ## Token lifetime
 
