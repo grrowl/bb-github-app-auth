@@ -16,6 +16,7 @@ import {
   PluginCliError,
   cliCommand,
   defineCli,
+  defineRpcContract,
   type BbPluginApi,
   type ExperimentalPluginProviderEnvContext,
   type ExperimentalPluginProviderEnvEntry,
@@ -56,6 +57,76 @@ function splitList(value: string): string[] {
     .map((item) => item.trim())
     .filter((item) => item !== "");
 }
+
+/** Realtime channel the settings page listens on; fires after any app change. */
+const APPS_CHANGED = "apps-changed";
+
+const tokenStatusSchema = z
+  .object({
+    hasToken: z.boolean(),
+    expiresAt: z.string().nullable(),
+    identity: z.string().nullable(),
+    lastError: z.string().nullable(),
+  })
+  .nullable();
+
+const projectAppSchema = z.object({
+  projectId: z.string(),
+  projectName: z.string().nullable(),
+  appId: z.string(),
+  installationId: z.string(),
+  privateKeyPath: z.string(),
+  token: tokenStatusSchema,
+});
+
+const defaultAppSchema = z
+  .object({
+    appId: z.string(),
+    installationId: z.string(),
+    privateKeyPath: z.string(),
+    projects: z.array(z.string()),
+    enableByEnvVar: z.boolean(),
+    enableEnvVarName: z.string(),
+    token: tokenStatusSchema,
+  })
+  .nullable();
+
+const overviewOutputSchema = z.object({
+  defaultApp: defaultAppSchema,
+  providerIds: z.array(z.string()),
+  projectApps: z.array(projectAppSchema),
+});
+const projectsOutputSchema = z.object({
+  projects: z.array(z.object({ id: z.string(), name: z.string() })),
+});
+
+export type OverviewResult = z.infer<typeof overviewOutputSchema>;
+export type ProjectSummary = { id: string; name: string };
+
+// The data plane for the settings page. app.tsx imports only the type.
+export const rpcContract = defineRpcContract({
+  projects_list: {
+    input: z.null(),
+    output: projectsOutputSchema,
+  },
+  overview: {
+    input: z.null(),
+    output: overviewOutputSchema,
+  },
+  app_set: {
+    input: z.object({
+      projectId: z.string().min(1),
+      appId: z.string().trim().min(1),
+      installationId: z.string().trim().min(1),
+      privateKeyPath: z.string().trim().min(1),
+    }),
+    output: z.object({ ok: z.literal(true) }),
+  },
+  app_unset: {
+    input: z.object({ projectId: z.string().min(1) }),
+    output: z.object({ removed: z.boolean() }),
+  },
+});
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
@@ -176,6 +247,29 @@ export default async function plugin(bb: BbPluginApi) {
       if (app !== null) rows.push({ projectId, app });
     }
     return rows;
+  }
+  async function storeApp(projectId: string, app: AppConfig): Promise<void> {
+    await bb.storage.kv.set(APP_PREFIX + projectId, app);
+    sources.delete(configKey(app));
+    bb.realtime.publish(APPS_CHANGED, {});
+  }
+  async function removeApp(projectId: string): Promise<boolean> {
+    const existing = await projectApp(projectId);
+    await bb.storage.kv.delete(APP_PREFIX + projectId);
+    if (existing !== null) sources.delete(configKey(existing));
+    bb.realtime.publish(APPS_CHANGED, {});
+    return existing !== null;
+  }
+  // A serialisable token status for one app, or null when nothing is cached.
+  function tokenStatusFor(app: AppConfig) {
+    const state = sources.get(configKey(app))?.status();
+    if (state === undefined) return null;
+    return {
+      hasToken: state.hasToken,
+      expiresAt: state.expiresAt,
+      identity: state.identity ? `${state.identity.slug}[bot]` : null,
+      lastError: state.lastError,
+    };
   }
 
   settings.onChange(async () => {
@@ -476,8 +570,7 @@ export default async function plugin(bb: BbPluginApi) {
               installationId: input.options["installation-id"],
               privateKeyPath: input.options["key-path"],
             };
-            await bb.storage.kv.set(APP_PREFIX + projectId, app);
-            sources.delete(configKey(app));
+            await storeApp(projectId, app);
             return {
               exitCode: 0,
               stdout: input.options.json
@@ -491,14 +584,12 @@ export default async function plugin(bb: BbPluginApi) {
           options: { project: projectOption, json: jsonOption },
           async run(input, ctx) {
             const projectId = resolveProjectId(input.options.project, ctx);
-            const existing = await projectApp(projectId);
-            await bb.storage.kv.delete(APP_PREFIX + projectId);
-            if (existing !== null) sources.delete(configKey(existing));
+            const removed = await removeApp(projectId);
             return {
               exitCode: 0,
               stdout: input.options.json
-                ? JSON.stringify({ projectId, removed: existing !== null })
-                : existing !== null
+                ? JSON.stringify({ projectId, removed })
+                : removed
                   ? `removed the app for project ${projectId}`
                   : `project ${projectId} had no stored app`,
             };
@@ -549,6 +640,51 @@ export default async function plugin(bb: BbPluginApi) {
       },
     }),
   );
+
+  bb.rpc.register(rpcContract, {
+    projects_list: async () => {
+      const list = await bb.sdk.projects.list({});
+      return {
+        projects: list
+          .map((project) => ({ id: project.id, name: project.name }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+      };
+    },
+    overview: async () => {
+      const stored = await listProjectApps();
+      const projectApps = await Promise.all(
+        stored.map(async ({ projectId, app }) => ({
+          projectId,
+          projectName: await projectName(projectId),
+          appId: app.appId,
+          installationId: app.installationId,
+          privateKeyPath: expandHome(app.privateKeyPath),
+          token: tokenStatusFor(app),
+        })),
+      );
+      return {
+        defaultApp:
+          config.app === null
+            ? null
+            : {
+                appId: config.app.appId,
+                installationId: config.app.installationId,
+                privateKeyPath: expandHome(config.app.privateKeyPath),
+                projects: config.projects,
+                enableByEnvVar: config.enableByEnvVar,
+                enableEnvVarName: config.enableEnvVarName,
+                token: tokenStatusFor(config.app),
+              },
+        providerIds: config.providerIds,
+        projectApps,
+      };
+    },
+    app_set: async ({ projectId, appId, installationId, privateKeyPath }) => {
+      await storeApp(projectId, { appId, installationId, privateKeyPath });
+      return { ok: true as const };
+    },
+    app_unset: async ({ projectId }) => ({ removed: await removeApp(projectId) }),
+  });
 
   bb.onDispose(() => {
     sources.clear();

@@ -155,6 +155,15 @@ A stored project app takes precedence over the default app for that project.
 
 `--project` defaults to the current thread's project.
 
+## Settings page
+
+Open Settings, then Installed plugins, then GitHub App Auth. The form at the top
+edits the default app, the one every listed project shares. Below it, the GitHub
+Apps by project section shows that default app, then a project dropdown. Pick a
+project to view or edit its own stored app, and Save or Remove it there. This is
+the same per-project storage that `set-app` writes, so a change on either side
+shows on the other.
+
 ## Token lifetime
 
 An installation token expires one hour after it is minted. The plugin keeps
