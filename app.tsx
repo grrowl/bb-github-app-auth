@@ -1,9 +1,10 @@
 // bb-plugin-github-app-auth — settings page.
 //
 // Rendered below the host's own settings form on the plugin's settings page.
-// The form above edits the default app (all projects). This section shows that
-// default app read-only, then a project dropdown for storing one GitHub App on
-// one project, the way bb's own Environment variables page scopes values.
+// The form above edits the default app (all projects). This section has one
+// project dropdown: "All projects (defaults)" shows the default app read-only,
+// and a specific project stores its own GitHub App, the way bb's own
+// Environment variables page scopes values.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -37,12 +38,14 @@ function Field({
   onChange,
   placeholder,
   mono,
+  disabled,
 }: {
   label: string;
   value: string;
   onChange: (next: string) => void;
   placeholder: string;
   mono?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <label className="flex flex-col gap-1.5">
@@ -51,45 +54,11 @@ function Field({
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        disabled={disabled}
+        readOnly={disabled}
         className={cn(mono && "font-mono")}
       />
     </label>
-  );
-}
-
-function DefaultAppCard({ overview }: { overview: OverviewResult }) {
-  const app = overview.defaultApp;
-  return (
-    <section className="rounded-lg border border-border bg-card p-4">
-      <h3 className="text-sm font-semibold text-foreground">All projects</h3>
-      <p className="mt-1 text-sm text-muted-foreground">
-        The default app comes from the settings above. A project without its own
-        app uses it when the project is listed or defines the enable variable.
-      </p>
-      {app === null ? (
-        <p className="mt-3 text-sm text-muted-foreground">
-          No default app is set. Fill in the App ID, installation ID and private
-          key path above, or leave them empty to use only per-project apps.
-        </p>
-      ) : (
-        <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="text-muted-foreground">App ID</dt>
-          <dd className="font-mono">{app.appId}</dd>
-          <dt className="text-muted-foreground">Installation ID</dt>
-          <dd className="font-mono">{app.installationId}</dd>
-          <dt className="text-muted-foreground">Private key</dt>
-          <dd className="truncate font-mono">{app.privateKeyPath}</dd>
-          <dt className="text-muted-foreground">Projects</dt>
-          <dd>{app.projects.length > 0 ? app.projects.join(", ") : "none"}</dd>
-          <dt className="text-muted-foreground">Enable by variable</dt>
-          <dd>
-            {app.enableByEnvVar ? `on (${app.enableEnvVarName})` : "off"}
-          </dd>
-          <dt className="text-muted-foreground">Token</dt>
-          <dd>{tokenLine(app.token)}</dd>
-        </dl>
-      )}
-    </section>
   );
 }
 
@@ -111,19 +80,24 @@ function ProjectEditor({
     () => new Map(overview.projectApps.map((app) => [app.projectId, app])),
     [overview.projectApps],
   );
-  const current = selected === ALL_PROJECTS ? undefined : stored.get(selected);
+  const isDefaults = selected === ALL_PROJECTS;
+  const current = isDefaults ? undefined : stored.get(selected);
+  const defaultApp = overview.defaultApp;
+  // The values shown in the fields: the default app when "All projects
+  // (defaults)" is selected, otherwise the selected project's stored app.
+  const source = isDefaults ? defaultApp : current;
 
   const [appId, setAppId] = useState("");
   const [installationId, setInstallationId] = useState("");
   const [keyPath, setKeyPath] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Reload the form when the selected project or its stored values change.
+  // Reload the form when the selection or the values it shows change.
   useEffect(() => {
-    setAppId(current?.appId ?? "");
-    setInstallationId(current?.installationId ?? "");
-    setKeyPath(current?.privateKeyPath ?? "");
-  }, [current?.appId, current?.installationId, current?.privateKeyPath, selected]);
+    setAppId(source?.appId ?? "");
+    setInstallationId(source?.installationId ?? "");
+    setKeyPath(source?.privateKeyPath ?? "");
+  }, [source?.appId, source?.installationId, source?.privateKeyPath, selected]);
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -168,10 +142,9 @@ function ProjectEditor({
 
   return (
     <section className="rounded-lg border border-border bg-card p-4">
-      <h3 className="text-sm font-semibold text-foreground">One project</h3>
+      <h3 className="text-sm font-semibold text-foreground">GitHub Apps by project</h3>
       <p className="mt-1 text-sm text-muted-foreground">
-        Store one GitHub App for one project. It stays on the bb server and no
-        agent can read it.
+        Set a GitHub App for one project. It stays on the server.
       </p>
 
       <label className="mt-3 flex flex-col gap-1.5">
@@ -181,7 +154,7 @@ function ProjectEditor({
           onChange={(event) => onSelect(event.target.value)}
           className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <option value={ALL_PROJECTS}>Choose a project…</option>
+          <option value={ALL_PROJECTS}>All projects (defaults)</option>
           {projects.map((project) => (
             <option key={project.id} value={project.id}>
               {project.name}
@@ -191,31 +164,44 @@ function ProjectEditor({
         </select>
       </label>
 
-      {selected === ALL_PROJECTS ? null : (
-        <form onSubmit={save} className="mt-4 flex flex-col gap-3">
-          <p className="text-sm text-muted-foreground">
-            {stored.has(selected)
+      <form onSubmit={save} className="mt-4 flex flex-col gap-3">
+        <p className="text-sm text-muted-foreground">
+          {isDefaults
+            ? defaultApp === null
+              ? "No default app is set. Add one in the settings above."
+              : "The default app is set in the settings above."
+            : stored.has(selected)
               ? `Editing the app stored for ${nameFor(selected)}.`
               : `No app stored for ${nameFor(selected)} yet.`}
-          </p>
-          <Field label="App ID" value={appId} onChange={setAppId} placeholder="123456" mono />
-          <Field
-            label="Installation ID"
-            value={installationId}
-            onChange={setInstallationId}
-            placeholder="98765432"
-            mono
-          />
-          <Field
-            label="Private key path"
-            value={keyPath}
-            onChange={setKeyPath}
-            placeholder="~/.config/github-apps/my-app.private-key.pem"
-            mono
-          />
-          {current?.token ? (
-            <p className="text-xs text-muted-foreground">{tokenLine(current.token)}</p>
-          ) : null}
+        </p>
+        <Field
+          label="App ID"
+          value={appId}
+          onChange={setAppId}
+          placeholder="123456"
+          mono
+          disabled={isDefaults}
+        />
+        <Field
+          label="Installation ID"
+          value={installationId}
+          onChange={setInstallationId}
+          placeholder="98765432"
+          mono
+          disabled={isDefaults}
+        />
+        <Field
+          label="Private key path"
+          value={keyPath}
+          onChange={setKeyPath}
+          placeholder="~/.config/github-apps/my-app.private-key.pem"
+          mono
+          disabled={isDefaults}
+        />
+        {source?.token ? (
+          <p className="text-xs text-muted-foreground">{tokenLine(source.token)}</p>
+        ) : null}
+        {isDefaults ? null : (
           <div className="flex items-center gap-2">
             <Button type="submit" disabled={busy}>
               <Icon name="Check" className="size-4" />
@@ -234,8 +220,8 @@ function ProjectEditor({
               </Button>
             ) : null}
           </div>
-        </form>
-      )}
+        )}
+      </form>
     </section>
   );
 }
@@ -288,7 +274,6 @@ function SettingsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <DefaultAppCard overview={overview} />
       <ProjectEditor
         projects={projects}
         overview={overview}
@@ -304,7 +289,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "project-apps",
     title: "GitHub Apps by project",
-    description: "Give one project its own GitHub App, kept on the server.",
+    description: "Set a GitHub App for one project. It stays on the server.",
     component: SettingsPage,
   });
 });

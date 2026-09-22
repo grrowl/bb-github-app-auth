@@ -132,7 +132,7 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     appId: {
       type: "string",
-      label: "Default GitHub App ID (used when a project has no stored app)",
+      label: "Default GitHub App ID",
       default: "",
     },
     installationId: {
@@ -142,44 +142,43 @@ export default async function plugin(bb: BbPluginApi) {
     },
     privateKeyPath: {
       type: "string",
-      label: "Default private key PEM path (on the bb server machine; ~ allowed)",
+      label: "Default private key file path",
       default: "",
     },
     projects: {
       type: "string",
-      label: "Projects that receive the default app (comma-separated names or ids)",
+      label: "Projects that use the default app",
       default: "",
     },
     enableByEnvVar: {
       type: "boolean",
-      label:
-        "Also give the default app to any project that defines the GITHUB_APP_ID environment variable",
+      label: "Give the default app to a project that sets a GITHUB_APP_ID variable",
       default: true,
     },
     enableEnvVarName: {
       type: "string",
-      label: "Environment variable whose presence enables the default app for a project",
+      label: "Variable name that enables the default app",
       default: "GITHUB_APP_ID",
     },
     providerIds: {
       type: "string",
-      label: "Provider ids that receive the token (comma-separated; reload after a change)",
+      label: "Providers that receive the token. Reload after a change.",
       default: DEFAULT_PROVIDER_IDS,
     },
     refreshMarginMinutes: {
       type: "number",
-      label: "Re-mint when fewer than this many minutes remain",
+      label: "Get a new token when fewer than this many minutes remain",
       default: 10,
       experimental_schema: z.number().int().min(1).max(50),
     },
     gitIdentity: {
       type: "boolean",
-      label: "Set git author and committer to the app bot user",
+      label: "Set the git author and committer to the app",
       default: true,
     },
     gitPushAsApp: {
       type: "boolean",
-      label: "Rewrite github.com SSH remotes to HTTPS and authenticate git with the token",
+      label: "Send github.com git pushes through the app token",
       default: true,
     },
   });
