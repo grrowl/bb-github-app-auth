@@ -26,7 +26,7 @@ Try bb GitHub App Auth today!
 ## What it does
 
 bb runs coding agents in threads. Each time bb starts, resumes, forks or sends
-a turn to an agent in a project you have listed, this plugin hands the agent a
+a turn to an agent in a project you have enabled, this plugin hands the agent a
 fresh GitHub App installation token. The agent sees it as `GH_TOKEN` and
 `GITHUB_TOKEN`, so `gh` and `git` act as the app without any login step.
 
@@ -34,45 +34,98 @@ The plugin also sets the git author and committer to the app's bot user, and
 it rewrites `git@github.com:` remotes to HTTPS so pushes use the token
 instead of your SSH key. Both of these can be switched off.
 
-Projects you do not list get nothing. Personal projects stay personal.
+Projects you have not enabled get nothing. Personal projects stay personal.
 
-## Prerequisites
+## Set up the GitHub App
 
-- A GitHub App installed on the organisation or account that owns the
-  repositories. Give it `contents: write` and `pull_requests: write`, and add
-  `issues: write` if the agents will work on issues.
-- The app's private key PEM file on the machine that runs the bb server.
-- The app id and the installation id. The app id is on the app's settings
-  page. The installation id is the number at the end of the installation's
-  settings URL.
-- `gh` on the PATH of every machine that runs threads.
+Do this once on GitHub.
 
-## Configure
+1. Go to Settings, then Developer settings, then GitHub Apps, then New GitHub
+   App. An organisation can create the app under the organisation's settings
+   instead, so the organisation owns it.
+2. Give it a name. Uncheck Webhook. This app needs no webhook.
+3. Under Repository permissions, grant only what your agents need. `Contents:
+   Read and write` and `Pull requests: Read and write` cover commits and pull
+   requests. Add `Issues: Read and write` for issue work. Leave everything else
+   at No access.
+4. Create the app. On its page, note the App ID.
+5. Under Private keys, choose Generate a private key. GitHub downloads a `.pem`
+   file. Put it on the machine that runs the bb server and keep it readable
+   only by you.
+6. Choose Install App, and install it on the account or organisation that owns
+   the repositories. Pick the repositories the agents may touch.
+7. Open the installation's settings. The URL ends in a number, e.g.
+   `.../installations/12345678`. That number is the installation ID.
+
+You now have three values: the app id, the installation id, and the path to
+the private key file.
+
+## Give the plugin the app credentials
+
+The plugin needs the app id, the installation id, and the private key path.
+Use one of these two ways.
+
+### Plugin settings
 
 ```bash
 bb plugin install https://github.com/grrowl/bb-github-app-auth
 bb plugin config github-app-auth set appId 123456
 bb plugin config github-app-auth set installationId 98765432
 bb plugin config github-app-auth set privateKeyPath ~/.config/github-apps/my-app.private-key.pem
-bb plugin config github-app-auth set projects my-project
 bb plugin reload github-app-auth
 bb github-app-auth status
 ```
+
+### The bb server environment
+
+Leave `appId`, `installationId` and `privateKeyPath` empty in plugin settings.
+The plugin then reads `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and
+`GITHUB_APP_PRIVATE_KEY_PATH` from the bb server's own environment. Set them at
+the global scope in Settings, then Environment variables, or export them in the
+shell that starts the bb server.
+
+Use the global scope, not a single project's scope. bb hides a project's
+environment variable values from plugins, so the plugin cannot read app
+credentials that are stored on one project. Project scope is for turning a
+project on, described next, not for holding the credentials.
 
 The private key is read on the bb server machine. Tokens are minted there and
 sent to whichever machine runs the thread, so the key never has to be copied
 to other machines.
 
-If `appId`, `installationId` or `privateKeyPath` is left empty, the plugin
-reads `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and
-`GITHUB_APP_PRIVATE_KEY_PATH` from the bb server's own environment instead.
+## Choose which projects get the token
+
+Use either way, or both. A project is enabled if either rule matches.
+
+### The projects setting
+
+List project names or ids.
+
+```bash
+bb plugin config github-app-auth set projects my-project,another-project
+bb plugin reload github-app-auth
+```
+
+### A project environment variable
+
+Leave the projects setting empty and turn on `enableByEnvVar`, which is on by
+default. Then any project that defines a `GITHUB_APP_ID` environment variable
+is enabled, and any project that does not is left alone. This matches how you
+already scope secrets in bb.
+
+In Settings, then Environment variables, pick a project from the scope menu,
+add a variable named `GITHUB_APP_ID`, and save. The plugin reads only that the
+name is present, never its value, so the value you store there can be a
+placeholder. Your personal projects never define it, so they never get a token.
 
 ## Settings
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `appId`, `installationId`, `privateKeyPath` | empty | The GitHub App. All three are needed. |
-| `projects` | empty | Comma-separated project names or ids that get the token. Empty means no project. |
+| `appId`, `installationId`, `privateKeyPath` | empty | The GitHub App. All three are needed, from plugin settings or the bb server environment. |
+| `projects` | empty | Comma-separated project names or ids that get the token. |
+| `enableByEnvVar` | true | Also enable any project that defines the enable environment variable. |
+| `enableEnvVarName` | GITHUB_APP_ID | The environment variable whose presence on a project enables it. |
 | `providerIds` | claude-code, codex, pi, acp-cursor, acp-opencode, acp-hermes-agent, acp-amp | Agent providers that get the variables. Reload the plugin after a change. |
 | `refreshMarginMinutes` | 10 | Mint a new token when fewer than this many minutes remain. |
 | `gitIdentity` | true | Set `GIT_AUTHOR_*` and `GIT_COMMITTER_*` to `<slug>[bot]`. |

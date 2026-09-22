@@ -7,23 +7,36 @@ a GitHub App for free with only the scopes you choose, install this plugin,
 and every agent turn in the projects you pick runs as the app. Pull requests
 open under the app's name. You review them. You stay in charge.
 
-## What it does
+## What you get
 
-- Mints a short-lived GitHub App installation token for each agent turn and
-  sets it as `GH_TOKEN` and `GITHUB_TOKEN`.
-- Only touches the projects you list. Personal projects stay personal.
-- Mints a new token before the one-hour expiry, and keeps a token warm for
-  new threads.
-- Sets the git author and committer to the app's bot user, so commits are
-  the app's too.
-- Rewrites GitHub SSH remotes to HTTPS and sends credentials through `gh`,
-  so pushes use the token and not your SSH key.
-- Ships a skill that tells agents how to refresh a token inside a long turn.
+- A short-lived GitHub App installation token set as `GH_TOKEN` and
+  `GITHUB_TOKEN` for each agent turn, so `gh` and `git` act as the app.
+- Commits under the app's bot user, because the plugin sets the git author and
+  committer too.
+- Pushes over the token, because the plugin rewrites GitHub SSH remotes to
+  HTTPS and routes credentials through `gh`.
+- Scope you control. Only the projects you enable get a token. Personal
+  projects stay personal.
+
+## How it works
+
+Give the plugin the app id, the installation id, and the private key path,
+through plugin settings or the bb server environment. Enable a project by name,
+or let the plugin enable any project that defines a `GITHUB_APP_ID` environment
+variable. The plugin mints a token on the bb server and sends only the token to
+the machine that runs the thread. It mints a new token before the one-hour
+expiry and keeps a recently used token fresh in the background.
+
+## Requirements
+
+- A GitHub App you create and install, with the scopes you choose.
+- The app's private key file on the bb server machine.
+- `gh` on the machines that run threads.
+
+The plugin never writes a token or the private key to its logs.
 
 ## Commands
 
 `bb github-app-auth status`, `env`, `token` and `refresh`.
-
-The plugin never writes a token or the private key to its logs.
 
 Try bb GitHub App Auth today!

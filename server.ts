@@ -34,6 +34,8 @@ const PROJECT_NAME_TTL_MS = 60 * 1000;
 interface ResolvedConfig {
   app: AppConfig | null;
   projects: string[];
+  enableByEnvVar: boolean;
+  enableEnvVarName: string;
   providerIds: string[];
   refreshMarginMs: number;
   gitIdentity: boolean;
@@ -68,6 +70,17 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Projects that receive the token (comma-separated names or ids)",
       default: "",
+    },
+    enableByEnvVar: {
+      type: "boolean",
+      label:
+        "Also enable any project that defines the GITHUB_APP_ID environment variable",
+      default: true,
+    },
+    enableEnvVarName: {
+      type: "string",
+      label: "Environment variable whose presence enables a project",
+      default: "GITHUB_APP_ID",
     },
     providerIds: {
       type: "string",
@@ -108,6 +121,8 @@ export default async function plugin(bb: BbPluginApi) {
           ? { appId, installationId, privateKeyPath }
           : null,
       projects: splitList(values.projects),
+      enableByEnvVar: values.enableByEnvVar,
+      enableEnvVarName: values.enableEnvVarName.trim() || "GITHUB_APP_ID",
       providerIds: splitList(values.providerIds),
       refreshMarginMs: values.refreshMarginMinutes * 60 * 1000,
       gitIdentity: values.gitIdentity,
@@ -137,9 +152,9 @@ export default async function plugin(bb: BbPluginApi) {
     bb.status.needsConfiguration(
       "Set appId, installationId and privateKeyPath (or export GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_PATH for the bb server), then run `bb plugin reload github-app-auth`.",
     );
-  } else if (config.projects.length === 0) {
+  } else if (config.projects.length === 0 && !config.enableByEnvVar) {
     bb.status.needsConfiguration(
-      "Set projects to the project names or ids that should receive the token, then run `bb plugin reload github-app-auth`.",
+      "Set projects to the project names or ids that should receive the token, or turn on enableByEnvVar, then run `bb plugin reload github-app-auth`.",
     );
   }
 
@@ -159,13 +174,40 @@ export default async function plugin(bb: BbPluginApi) {
       return cached?.name ?? null;
     }
   }
+  // A project enables the plugin when it is on the projects list, or, when
+  // enableByEnvVar is on, when it defines the enable environment variable.
+  // Project environment values are masked from plugins, so only the presence
+  // of the name is read here, never its value.
+  const envVarProjects = new Map<string, { present: boolean; at: number }>();
+  async function projectDefinesEnableVar(projectId: string): Promise<boolean> {
+    const cached = envVarProjects.get(projectId);
+    if (cached !== undefined && Date.now() - cached.at < PROJECT_NAME_TTL_MS) {
+      return cached.present;
+    }
+    try {
+      const env = await bb.sdk.projects.machineEnvironment({ projectId });
+      const names = [...env.variables, ...env.inheritedVariables];
+      const present = names.some((entry) => entry.name === config.enableEnvVarName);
+      envVarProjects.set(projectId, { present, at: Date.now() });
+      return present;
+    } catch (error) {
+      bb.log.warn(`could not read env for project ${projectId}: ${String(error)}`);
+      return cached?.present ?? false;
+    }
+  }
   async function projectEnabled(projectId: string): Promise<boolean> {
-    if (config.projects.length === 0) return false;
     if (config.projects.includes(projectId)) return true;
     const name = await projectName(projectId);
-    if (name === null) return false;
-    const wanted = name.toLowerCase();
-    return config.projects.some((entry) => entry.toLowerCase() === wanted);
+    if (
+      name !== null &&
+      config.projects.some((entry) => entry.toLowerCase() === name.toLowerCase())
+    ) {
+      return true;
+    }
+    if (config.enableByEnvVar && (await projectDefinesEnableVar(projectId))) {
+      return true;
+    }
+    return false;
   }
 
   async function resolveEntries(
@@ -303,6 +345,8 @@ export default async function plugin(bb: BbPluginApi) {
               privateKeyPath:
                 config.app === null ? null : expandHome(config.app.privateKeyPath),
               projects: config.projects,
+              enableByEnvVar: config.enableByEnvVar,
+              enableEnvVarName: config.enableEnvVarName,
               providerIds: config.providerIds,
               refreshMarginMinutes: config.refreshMarginMs / 60000,
               gitIdentity: config.gitIdentity,
@@ -318,6 +362,7 @@ export default async function plugin(bb: BbPluginApi) {
               `installation id: ${payload.installationId ?? "-"}`,
               `private key path: ${payload.privateKeyPath ?? "-"}`,
               `projects: ${payload.projects.join(", ") || "-"}`,
+              `enable by env var: ${payload.enableByEnvVar} (${payload.enableEnvVarName})`,
               `providers: ${payload.providerIds.join(", ") || "-"}`,
               `refresh margin: ${payload.refreshMarginMinutes} min`,
               `git identity: ${payload.gitIdentity}`,

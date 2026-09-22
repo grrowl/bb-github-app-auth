@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-github-app-auth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Mint short-lived GitHub App installation tokens and inject them as GH_TOKEN and GITHUB_TOKEN into agent turns for selected projects.",
   "license": "MIT",
   "author": "Tom McKenzie",
