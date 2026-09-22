@@ -26,7 +26,7 @@ Try bb GitHub App Auth today!
 ## What it does
 
 bb runs coding agents in threads. Each time bb starts, resumes, forks or sends
-a turn to an agent in a project you have enabled, this plugin hands the agent a
+a turn to an agent in a project you have set up, this plugin hands the agent a
 fresh GitHub App installation token. The agent sees it as `GH_TOKEN` and
 `GITHUB_TOKEN`, so `gh` and `git` act as the app without any login step.
 
@@ -34,7 +34,7 @@ The plugin also sets the git author and committer to the app's bot user, and
 it rewrites `git@github.com:` remotes to HTTPS so pushes use the token
 instead of your SSH key. Both of these can be switched off.
 
-Projects you have not enabled get nothing. Personal projects stay personal.
+A project you have not set up gets nothing. Personal projects stay personal.
 
 ## Set up the GitHub App
 
@@ -62,91 +62,98 @@ the private key file.
 
 ## Give the plugin the app credentials
 
-The plugin needs the app id, the installation id, and the private key path.
-Use one of these two ways.
+The plugin holds the credentials on the bb server and never sends them to an
+agent. It reads the private key, mints the token, and gives the agent only the
+token. Pick one of the ways below.
 
-### Plugin settings, recommended
+### One project
+
+This is the way to tie one app to one project. Run this once, from a thread in
+the project or with `--project`:
 
 ```bash
-bb plugin install https://github.com/grrowl/bb-github-app-auth
+bb github-app-auth set-app \
+  --app-id 123456 \
+  --installation-id 98765432 \
+  --key-path ~/.config/github-apps/my-app.private-key.pem
+```
+
+The plugin stores the credentials in its own server-side storage, keyed to that
+project. Only that project has them, and no other project or agent can read
+them. A project that has a stored app is enabled on its own, with no list to
+keep. Remove it later with `bb github-app-auth unset-app`.
+
+You cannot store the credentials as a project environment variable. bb hides a
+project's environment variable values from plugins, so the plugin could not
+read them. `set-app` is the project-scoped path that works.
+
+### A default app for several projects
+
+Set one app in plugin settings, then choose which projects use it.
+
+```bash
 bb plugin config github-app-auth set appId 123456
 bb plugin config github-app-auth set installationId 98765432
 bb plugin config github-app-auth set privateKeyPath ~/.config/github-apps/my-app.private-key.pem
 bb plugin reload github-app-auth
-bb github-app-auth status
 ```
 
-Plugin settings live on the bb server and never reach an agent's environment.
-The plugin reads them, mints the token, and gives the agent only the token.
-This is the safe place for the credentials.
-
-### The bb server launch environment
-
-You can instead leave `appId`, `installationId` and `privateKeyPath` empty in
-plugin settings. The plugin then reads `GITHUB_APP_ID`,
-`GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` from the bb
-server process's own environment, which you set by exporting them in the shell
-or launch agent that starts bb.
-
-Do not use the Environment variables settings page for the credentials. A
-value stored on one project is hidden from plugins, so the plugin cannot read
-it. A value stored at the global scope is readable, but bb also copies every
-global value into every agent's environment, so an agent in any project could
-read the private key path and the app id. Keep the credentials in plugin
-settings or the bb server launch environment, where agents never see them.
-
-The private key is read on the bb server machine. Tokens are minted there and
-sent to whichever machine runs the thread, so the key never has to be copied
-to other machines.
-
-## Choose which projects get the token
-
-Use either way, or both. A project is enabled if either rule matches.
-
-### The projects setting
-
-List project names or ids.
+Choose the projects by name or id:
 
 ```bash
 bb plugin config github-app-auth set projects my-project,another-project
 bb plugin reload github-app-auth
 ```
 
-### A project environment variable
-
-Leave the projects setting empty and turn on `enableByEnvVar`, which is on by
+Or leave the projects setting empty and keep `enableByEnvVar` on, which is the
 default. Then any project that defines a `GITHUB_APP_ID` environment variable
-is enabled, and any project that does not is left alone. This matches how you
-already scope secrets in bb.
+gets the default app, and any project that does not is left alone. In Settings,
+then Environment variables, pick a project, add a variable named
+`GITHUB_APP_ID`, and save. The plugin reads only that the name is set on that
+project, never its value, so the value can be a placeholder. Your personal
+projects never define it, so they never get a token.
 
-In Settings, then Environment variables, pick a project from the scope menu,
-add a variable named `GITHUB_APP_ID`, and save. The plugin reads only that the
-name is set on that project, never its value, so the value you store there can
-be a placeholder. A global variable of the same name does not enable a project,
-so a global credential value never turns projects on. Your personal projects
-never define it, so they never get a token.
+### The bb server launch environment
+
+The default app's credentials can also come from the bb server process's own
+environment, which you set by exporting `GITHUB_APP_ID`,
+`GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_PATH` in the shell or
+launch agent that starts bb. Leave the three plugin settings empty to use this.
+Do not set them at the global scope on the Environment variables page, because
+bb copies every global value into every agent's environment, and an agent could
+then read the private key path and the app id.
+
+The private key is read on the bb server machine. Tokens are minted there and
+sent to whichever machine runs the thread, so the key never has to be copied
+to other machines.
 
 ## Settings
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `appId`, `installationId`, `privateKeyPath` | empty | The GitHub App. All three are needed, from plugin settings or the bb server environment. |
-| `projects` | empty | Comma-separated project names or ids that get the token. |
-| `enableByEnvVar` | true | Also enable any project that defines the enable environment variable. |
-| `enableEnvVarName` | GITHUB_APP_ID | The environment variable whose presence on a project enables it. |
+| `appId`, `installationId`, `privateKeyPath` | empty | The default app, used by a project that has no stored app of its own. Read from plugin settings or the bb server environment. |
+| `projects` | empty | Comma-separated project names or ids that get the default app. |
+| `enableByEnvVar` | true | Also give the default app to any project that defines the enable environment variable. |
+| `enableEnvVarName` | GITHUB_APP_ID | The environment variable whose presence on a project enables the default app. |
 | `providerIds` | claude-code, codex, pi, acp-cursor, acp-opencode, acp-hermes-agent, acp-amp | Agent providers that get the variables. Reload the plugin after a change. |
 | `refreshMarginMinutes` | 10 | Mint a new token when fewer than this many minutes remain. |
 | `gitIdentity` | true | Set `GIT_AUTHOR_*` and `GIT_COMMITTER_*` to `<slug>[bot]`. |
 | `gitPushAsApp` | true | Rewrite `git@github.com:` remotes to HTTPS and send github.com credentials through `gh auth git-credential`. |
 
+A stored project app takes precedence over the default app for that project.
+
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `bb github-app-auth status [--json]` | Show the configuration, the enabled projects, when the token expires and which bot the app is. It never prints the token. |
+| `bb github-app-auth set-app --app-id <id> --installation-id <id> --key-path <path> [--project <id>]` | Store a project's app credentials on the server. |
+| `bb github-app-auth unset-app [--project <id>]` | Remove a project's stored app. |
+| `bb github-app-auth status [--json]` | Show the default app, each stored project app, token expiry and the bot identity. It never prints a token. |
 | `bb github-app-auth env [--project <id>]` | Print `export` lines for `GH_TOKEN` and `GITHUB_TOKEN`. |
 | `bb github-app-auth token [--project <id>] [--json]` | Print the current token on its own. |
-| `bb github-app-auth refresh [--json]` | Throw away the cached token and mint a new one. |
+| `bb github-app-auth refresh [--project <id>] [--json]` | Throw away the cached token and mint a new one. |
+
+`--project` defaults to the current thread's project.
 
 ## Token lifetime
 

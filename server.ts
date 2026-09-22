@@ -1,11 +1,17 @@
 // bb-plugin-github-app-auth — server entry.
 //
-// For every agent command (start, resume, fork, turn) in a configured project,
+// For every agent command (start, resume, fork, turn) in an enabled project,
 // contribute a fresh GitHub App installation token as GH_TOKEN and
 // GITHUB_TOKEN, plus the git identity and config that make commits and pushes
-// belong to the app. Tokens live about one hour; the source re-mints when a
+// belong to the app. Tokens live about one hour; each source re-mints when a
 // token is inside the refresh margin, and a background loop keeps a recently
 // used token warm so the per-command resolver stays fast.
+//
+// Credentials come from three places, most specific first: a project's own
+// stored credentials (`bb github-app-auth set-app`, kept in the plugin's
+// server-side storage and never sent to an agent), the plugin settings, and
+// the bb server process environment. Project credentials are the way to scope
+// one GitHub App to one project without exposing it to any other project.
 import {
   PluginCliError,
   cliCommand,
@@ -30,6 +36,8 @@ const DEFAULT_PROVIDER_IDS =
 const WARM_WINDOW_MS = 2 * 60 * 60 * 1000;
 const REFRESH_LOOP_MS = 30 * 1000;
 const PROJECT_NAME_TTL_MS = 60 * 1000;
+/** kv key prefix for a project's stored GitHub App credentials. */
+const APP_PREFIX = "app:";
 
 interface ResolvedConfig {
   app: AppConfig | null;
@@ -53,33 +61,33 @@ export default async function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     appId: {
       type: "string",
-      label: "GitHub App ID",
+      label: "Default GitHub App ID (used when a project has no stored app)",
       default: "",
     },
     installationId: {
       type: "string",
-      label: "GitHub App installation ID",
+      label: "Default GitHub App installation ID",
       default: "",
     },
     privateKeyPath: {
       type: "string",
-      label: "Private key PEM path (on the bb server machine; ~ allowed)",
+      label: "Default private key PEM path (on the bb server machine; ~ allowed)",
       default: "",
     },
     projects: {
       type: "string",
-      label: "Projects that receive the token (comma-separated names or ids)",
+      label: "Projects that receive the default app (comma-separated names or ids)",
       default: "",
     },
     enableByEnvVar: {
       type: "boolean",
       label:
-        "Also enable any project that defines the GITHUB_APP_ID environment variable",
+        "Also give the default app to any project that defines the GITHUB_APP_ID environment variable",
       default: true,
     },
     enableEnvVarName: {
       type: "string",
-      label: "Environment variable whose presence enables a project",
+      label: "Environment variable whose presence enables the default app for a project",
       default: "GITHUB_APP_ID",
     },
     providerIds: {
@@ -105,8 +113,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // Settings win; the server's own GITHUB_APP_* variables fill any gap so a
-  // host that already exports them needs no plugin configuration.
+  // The default app fills any project that has no stored app of its own. Its
+  // credentials come from plugin settings, then the bb server environment.
   async function loadConfig(): Promise<ResolvedConfig> {
     const values = await settings.get();
     const env = process.env;
@@ -131,30 +139,55 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let config = await loadConfig();
-  let source: InstallationTokenSource | null = null;
-  let lastUsedAt = 0;
 
-  function getSource(): InstallationTokenSource | null {
-    if (config.app === null) return null;
-    if (source === null || source.key !== configKey(config.app)) {
-      source = new InstallationTokenSource(config.app, config.refreshMarginMs, bb.log);
+  // One token source per distinct app, keyed by app id, installation and key
+  // path, so a per-project app and the default app never share a token cache.
+  const sources = new Map<string, InstallationTokenSource>();
+  function getSourceFor(app: AppConfig): InstallationTokenSource {
+    const key = configKey(app);
+    let existing = sources.get(key);
+    if (existing === undefined) {
+      existing = new InstallationTokenSource(app, config.refreshMarginMs, bb.log);
+      sources.set(key, existing);
     }
-    return source;
+    return existing;
+  }
+
+  // A project's own stored credentials. Kept in the plugin's server-side
+  // storage, so only the projects you set have an app and none of it reaches
+  // an agent's environment.
+  const appConfigSchema = z.object({
+    appId: z.string().min(1),
+    installationId: z.string().min(1),
+    privateKeyPath: z.string().min(1),
+  });
+  async function projectApp(projectId: string): Promise<AppConfig | null> {
+    const stored = await bb.storage.kv.get<unknown>(APP_PREFIX + projectId);
+    if (stored === undefined) return null;
+    const parsed = appConfigSchema.safeParse(stored);
+    return parsed.success ? parsed.data : null;
+  }
+  async function listProjectApps(): Promise<Array<{ projectId: string; app: AppConfig }>> {
+    const keys = await bb.storage.kv.list(APP_PREFIX);
+    const rows: Array<{ projectId: string; app: AppConfig }> = [];
+    for (const key of keys) {
+      const projectId = key.slice(APP_PREFIX.length);
+      const app = await projectApp(projectId);
+      if (app !== null) rows.push({ projectId, app });
+    }
+    return rows;
   }
 
   settings.onChange(async () => {
     config = await loadConfig();
-    source = null;
+    sources.clear();
     bb.log.info("settings changed; token cache cleared");
   });
 
-  if (config.app === null) {
+  const hasProjectApps = (await bb.storage.kv.list(APP_PREFIX)).length > 0;
+  if (config.app === null && !hasProjectApps) {
     bb.status.needsConfiguration(
-      "Set appId, installationId and privateKeyPath (or export GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_PATH for the bb server), then run `bb plugin reload github-app-auth`.",
-    );
-  } else if (config.projects.length === 0 && !config.enableByEnvVar) {
-    bb.status.needsConfiguration(
-      "Set projects to the project names or ids that should receive the token, or turn on enableByEnvVar, then run `bb plugin reload github-app-auth`.",
+      "Store a per-project app with `bb github-app-auth set-app`, or set appId, installationId and privateKeyPath (or export GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_PATH for the bb server) and run `bb plugin reload github-app-auth`.",
     );
   }
 
@@ -174,10 +207,13 @@ export default async function plugin(bb: BbPluginApi) {
       return cached?.name ?? null;
     }
   }
-  // A project enables the plugin when it is on the projects list, or, when
-  // enableByEnvVar is on, when it defines the enable environment variable.
-  // Project environment values are masked from plugins, so only the presence
-  // of the name is read here, never its value.
+
+  // The default app reaches a project on the projects list, or, when
+  // enableByEnvVar is on, a project that defines the enable environment
+  // variable. Project environment values are masked from plugins, so only the
+  // presence of the name is read here, never its value. An inherited global
+  // variable is excluded, so a global value of the same name never turns
+  // projects on.
   const envVarProjects = new Map<string, { present: boolean; at: number }>();
   async function projectDefinesEnableVar(projectId: string): Promise<boolean> {
     const cached = envVarProjects.get(projectId);
@@ -186,9 +222,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
     try {
       const env = await bb.sdk.projects.machineEnvironment({ projectId });
-      // Only a project-scoped variable enables a project. An inherited global
-      // variable is excluded, so the same name can carry app credentials at
-      // global scope without enabling every project.
       const present = env.variables.some(
         (entry) => entry.name === config.enableEnvVarName,
       );
@@ -199,7 +232,8 @@ export default async function plugin(bb: BbPluginApi) {
       return cached?.present ?? false;
     }
   }
-  async function projectEnabled(projectId: string): Promise<boolean> {
+  async function defaultAppEnabled(projectId: string): Promise<boolean> {
+    if (config.app === null) return false;
     if (config.projects.includes(projectId)) return true;
     const name = await projectName(projectId);
     if (
@@ -208,19 +242,24 @@ export default async function plugin(bb: BbPluginApi) {
     ) {
       return true;
     }
-    if (config.enableByEnvVar && (await projectDefinesEnableVar(projectId))) {
-      return true;
-    }
-    return false;
+    return config.enableByEnvVar && (await projectDefinesEnableVar(projectId));
+  }
+
+  // The app a project should use, or null when the project gets no token.
+  async function appForProject(projectId: string): Promise<AppConfig | null> {
+    const own = await projectApp(projectId);
+    if (own !== null) return own;
+    if (await defaultAppEnabled(projectId)) return config.app;
+    return null;
   }
 
   async function resolveEntries(
     projectId: string,
   ): Promise<ExperimentalPluginProviderEnvEntry[]> {
-    const tokenSource = getSource();
-    if (tokenSource === null || !(await projectEnabled(projectId))) return [];
+    const app = await appForProject(projectId);
+    if (app === null) return [];
+    const tokenSource = getSourceFor(app);
     const token = await tokenSource.getToken();
-    lastUsedAt = Date.now();
     let identity = null;
     try {
       identity = await tokenSource.getIdentity();
@@ -228,8 +267,8 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`could not resolve app identity: ${String(error)}`);
     }
     return buildEnvEntries(token, identity, {
-      appId: tokenSource.config.appId,
-      installationId: tokenSource.config.installationId,
+      appId: app.appId,
+      installationId: app.installationId,
       gitIdentity: config.gitIdentity,
       gitPushAsApp: config.gitPushAsApp,
     });
@@ -252,10 +291,11 @@ export default async function plugin(bb: BbPluginApi) {
     bb.providers.experimental_contributeEnv(providerId, contributeEnv);
   }
 
-  // A new thread in an enabled project warms the token before its first turn.
+  // A new thread in an enabled project warms its token before the first turn.
   bb.events.on("thread.created", async ({ thread }) => {
-    const tokenSource = getSource();
-    if (tokenSource === null || !(await projectEnabled(thread.projectId))) return;
+    const app = await appForProject(thread.projectId);
+    if (app === null) return;
+    const tokenSource = getSourceFor(app);
     await Promise.all([
       tokenSource.getToken().catch(() => undefined),
       tokenSource.getIdentity().catch(() => undefined),
@@ -277,24 +317,25 @@ export default async function plugin(bb: BbPluginApi) {
           );
         });
         if (signal.aborted) return;
-        const tokenSource = source;
-        if (
-          tokenSource === null ||
-          !tokenSource.status().hasToken ||
-          Date.now() - lastUsedAt > WARM_WINDOW_MS ||
-          !tokenSource.needsRefresh()
-        ) {
-          continue;
+        const now = Date.now();
+        for (const tokenSource of sources.values()) {
+          if (
+            !tokenSource.status().hasToken ||
+            now - tokenSource.lastUsedAt > WARM_WINDOW_MS ||
+            !tokenSource.needsRefresh(now)
+          ) {
+            continue;
+          }
+          await tokenSource.getToken().catch(() => undefined);
         }
-        await tokenSource.getToken().catch(() => undefined);
       }
     },
   });
 
-  async function projectFromCli(
+  function resolveProjectId(
     explicit: string | undefined,
     ctx: PluginCliContext,
-  ): Promise<string> {
+  ): string {
     const projectId = explicit ?? ctx.projectId;
     if (projectId === undefined) {
       throw new PluginCliError("no project in context", {
@@ -302,24 +343,18 @@ export default async function plugin(bb: BbPluginApi) {
         hint: "Add --project <id> (run `bb status` to see the current project id).",
       });
     }
-    if (!(await projectEnabled(projectId))) {
-      throw new PluginCliError(`project ${projectId} does not receive the token`, {
-        code: "project_not_enabled",
-        hint: "Add the project name or id to the plugin's projects setting, then run `bb plugin reload github-app-auth`.",
-      });
-    }
     return projectId;
   }
 
-  function requireSource(): InstallationTokenSource {
-    const tokenSource = getSource();
-    if (tokenSource === null) {
-      throw new PluginCliError("GitHub App is not configured", {
-        code: "not_configured",
-        hint: "Set appId, installationId and privateKeyPath with `bb plugin config github-app-auth set <key> <value>`.",
+  async function requireSourceFor(projectId: string): Promise<InstallationTokenSource> {
+    const app = await appForProject(projectId);
+    if (app === null) {
+      throw new PluginCliError(`project ${projectId} has no GitHub App`, {
+        code: "project_not_enabled",
+        hint: "Store one with `bb github-app-auth set-app`, add the project to the projects setting, or define the GITHUB_APP_ID environment variable on the project.",
       });
     }
-    return tokenSource;
+    return getSourceFor(app);
   }
 
   const projectOption = {
@@ -334,57 +369,147 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register(
     defineCli({
       name: "github-app-auth",
-      summary: "Inspect and refresh the GitHub App installation token injected into agent turns",
+      summary: "Store, inspect and refresh the GitHub App credentials injected into agent turns",
       commands: {
         status: cliCommand({
-          summary: "Show configuration, enabled projects and token expiry (never the token)",
+          summary: "Show configuration, stored project apps and token expiry (never the token)",
           options: { json: jsonOption },
           async run(input) {
-            const tokenSource = getSource();
-            const state = tokenSource?.status() ?? null;
+            const projectApps = await listProjectApps();
+            const tokenState = (app: AppConfig) =>
+              sources.get(configKey(app))?.status() ?? null;
             const payload = {
-              configured: config.app !== null,
-              appId: config.app?.appId ?? null,
-              installationId: config.app?.installationId ?? null,
-              privateKeyPath:
-                config.app === null ? null : expandHome(config.app.privateKeyPath),
-              projects: config.projects,
-              enableByEnvVar: config.enableByEnvVar,
-              enableEnvVarName: config.enableEnvVarName,
+              defaultApp:
+                config.app === null
+                  ? null
+                  : {
+                      appId: config.app.appId,
+                      installationId: config.app.installationId,
+                      privateKeyPath: expandHome(config.app.privateKeyPath),
+                      projects: config.projects,
+                      enableByEnvVar: config.enableByEnvVar,
+                      enableEnvVarName: config.enableEnvVarName,
+                      token: tokenState(config.app),
+                    },
+              projectApps: projectApps.map(({ projectId, app }) => ({
+                projectId,
+                appId: app.appId,
+                installationId: app.installationId,
+                privateKeyPath: expandHome(app.privateKeyPath),
+                token: tokenState(app),
+              })),
               providerIds: config.providerIds,
               refreshMarginMinutes: config.refreshMarginMs / 60000,
               gitIdentity: config.gitIdentity,
               gitPushAsApp: config.gitPushAsApp,
-              token: state,
             };
             if (input.options.json) {
               return { exitCode: 0, stdout: JSON.stringify(payload) };
             }
-            const lines = [
-              `configured: ${payload.configured}`,
-              `app id: ${payload.appId ?? "-"}`,
-              `installation id: ${payload.installationId ?? "-"}`,
-              `private key path: ${payload.privateKeyPath ?? "-"}`,
-              `projects: ${payload.projects.join(", ") || "-"}`,
-              `enable by env var: ${payload.enableByEnvVar} (${payload.enableEnvVarName})`,
+            const tokenLine = (state: ReturnType<typeof tokenState>) =>
+              `${state?.hasToken ?? false}${state?.expiresAt ? ` (expires ${state.expiresAt})` : ""}`;
+            const identityLine = (state: ReturnType<typeof tokenState>) =>
+              state?.identity
+                ? `${state.identity.slug}[bot] (user ${state.identity.botUserId})`
+                : "-";
+            const lines: string[] = [];
+            if (payload.defaultApp === null) {
+              lines.push("default app: none");
+            } else {
+              const d = payload.defaultApp;
+              lines.push(
+                "default app:",
+                `  app id: ${d.appId}`,
+                `  installation id: ${d.installationId}`,
+                `  private key path: ${d.privateKeyPath}`,
+                `  projects: ${d.projects.join(", ") || "-"}`,
+                `  enable by env var: ${d.enableByEnvVar} (${d.enableEnvVarName})`,
+                `  token cached: ${tokenLine(d.token)}`,
+                `  app identity: ${identityLine(d.token)}`,
+              );
+            }
+            if (payload.projectApps.length === 0) {
+              lines.push("project apps: none");
+            } else {
+              lines.push("project apps:");
+              for (const p of payload.projectApps) {
+                lines.push(
+                  `  ${p.projectId}:`,
+                  `    app id: ${p.appId}`,
+                  `    installation id: ${p.installationId}`,
+                  `    private key path: ${p.privateKeyPath}`,
+                  `    token cached: ${tokenLine(p.token)}`,
+                  `    app identity: ${identityLine(p.token)}`,
+                );
+              }
+            }
+            lines.push(
               `providers: ${payload.providerIds.join(", ") || "-"}`,
               `refresh margin: ${payload.refreshMarginMinutes} min`,
               `git identity: ${payload.gitIdentity}`,
               `git push as app: ${payload.gitPushAsApp}`,
-              `token cached: ${state?.hasToken ?? false}${state?.expiresAt ? ` (expires ${state.expiresAt})` : ""}`,
-              `app identity: ${state?.identity ? `${state.identity.slug}[bot] (user ${state.identity.botUserId})` : "-"}`,
-              `last error: ${state?.lastError ?? "-"}`,
-            ];
+            );
             return { exitCode: 0, stdout: lines.join("\n") };
+          },
+        }),
+        "set-app": cliCommand({
+          summary: "Store the GitHub App credentials for a project (server-side, never sent to an agent)",
+          options: {
+            project: projectOption,
+            "app-id": { type: "string", required: true, description: "GitHub App ID" },
+            "installation-id": {
+              type: "string",
+              required: true,
+              description: "GitHub App installation ID",
+            },
+            "key-path": {
+              type: "string",
+              required: true,
+              description: "Private key PEM path on the bb server (~ allowed)",
+            },
+            json: jsonOption,
+          },
+          async run(input, ctx) {
+            const projectId = resolveProjectId(input.options.project, ctx);
+            const app: AppConfig = {
+              appId: input.options["app-id"],
+              installationId: input.options["installation-id"],
+              privateKeyPath: input.options["key-path"],
+            };
+            await bb.storage.kv.set(APP_PREFIX + projectId, app);
+            sources.delete(configKey(app));
+            return {
+              exitCode: 0,
+              stdout: input.options.json
+                ? JSON.stringify({ projectId, appId: app.appId, installationId: app.installationId })
+                : `stored app ${app.appId} for project ${projectId}`,
+            };
+          },
+        }),
+        "unset-app": cliCommand({
+          summary: "Remove a project's stored GitHub App credentials",
+          options: { project: projectOption, json: jsonOption },
+          async run(input, ctx) {
+            const projectId = resolveProjectId(input.options.project, ctx);
+            const existing = await projectApp(projectId);
+            await bb.storage.kv.delete(APP_PREFIX + projectId);
+            if (existing !== null) sources.delete(configKey(existing));
+            return {
+              exitCode: 0,
+              stdout: input.options.json
+                ? JSON.stringify({ projectId, removed: existing !== null })
+                : existing !== null
+                  ? `removed the app for project ${projectId}`
+                  : `project ${projectId} had no stored app`,
+            };
           },
         }),
         token: cliCommand({
           summary: "Print a current installation token for the project (mints one when stale)",
           options: { project: projectOption, json: jsonOption },
           async run(input, ctx) {
-            await projectFromCli(input.options.project, ctx);
-            const token = await requireSource().getToken();
-            lastUsedAt = Date.now();
+            const projectId = resolveProjectId(input.options.project, ctx);
+            const token = await (await requireSourceFor(projectId)).getToken();
             return {
               exitCode: 0,
               stdout: input.options.json
@@ -397,9 +522,9 @@ export default async function plugin(bb: BbPluginApi) {
           summary: "Print export lines for GH_TOKEN and GITHUB_TOKEN; use with eval to refresh a long-running shell",
           options: { project: projectOption },
           async run(input, ctx) {
-            const projectId = await projectFromCli(input.options.project, ctx);
+            const projectId = resolveProjectId(input.options.project, ctx);
+            await requireSourceFor(projectId);
             const entries = await resolveEntries(projectId);
-            lastUsedAt = Date.now();
             const lines = entries
               .filter((entry) => entry.name === "GH_TOKEN" || entry.name === "GITHUB_TOKEN")
               .map((entry) => `export ${entry.name}=${shellQuote(String(entry.value))}`);
@@ -407,11 +532,11 @@ export default async function plugin(bb: BbPluginApi) {
           },
         }),
         refresh: cliCommand({
-          summary: "Discard the cached token and mint a new one now",
-          options: { json: jsonOption },
-          async run(input) {
-            const token = await requireSource().getToken({ force: true });
-            lastUsedAt = Date.now();
+          summary: "Discard the cached token for a project and mint a new one now",
+          options: { project: projectOption, json: jsonOption },
+          async run(input, ctx) {
+            const projectId = resolveProjectId(input.options.project, ctx);
+            const token = await (await requireSourceFor(projectId)).getToken({ force: true });
             const expiresAt = token.expiresAt.toISOString();
             return {
               exitCode: 0,
@@ -426,7 +551,7 @@ export default async function plugin(bb: BbPluginApi) {
   );
 
   bb.onDispose(() => {
-    source = null;
+    sources.clear();
   });
 }
 

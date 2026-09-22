@@ -62,6 +62,8 @@ export class InstallationTokenSource {
   private identity: AppIdentity | null = null;
   private identityPending: Promise<AppIdentity> | null = null;
   private lastError: string | null = null;
+  /** Epoch ms of the most recent getToken call; drives background refresh. */
+  lastUsedAt = 0;
 
   constructor(
     readonly config: AppConfig,
@@ -93,6 +95,7 @@ export class InstallationTokenSource {
 
   /** Return the cached token, or mint a new one when it is missing or stale. */
   async getToken(options: { force?: boolean } = {}): Promise<InstallationToken> {
+    this.lastUsedAt = Date.now();
     if (!options.force && !this.needsRefresh() && this.current !== null) {
       return this.current;
     }
