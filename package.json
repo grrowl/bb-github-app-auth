@@ -1,0 +1,53 @@
+{
+  "name": "bb-plugin-github-app-auth",
+  "version": "0.1.0",
+  "description": "Mint short-lived GitHub App installation tokens and inject them as GH_TOKEN and GITHUB_TOKEN into agent turns for selected projects.",
+  "license": "MIT",
+  "author": "Tom McKenzie",
+  "homepage": "https://github.com/grrowl/bb-github-app-auth#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/grrowl/bb-github-app-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/grrowl/bb-github-app-auth/issues"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "type": "module",
+  "files": [
+    "dist",
+    "server.ts",
+    "lib",
+    "skills",
+    "README.md",
+    "PLUGIN_OVERVIEW.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bb": ">=0.43",
+    "bbPluginSdk": ">=0.4.104"
+  },
+  "bb": {
+    "name": "GitHub App Auth",
+    "description": "Mint short-lived GitHub App installation tokens and inject them as GH_TOKEN and GITHUB_TOKEN into agent turns for selected projects.",
+    "branding": {
+      "icon": "Github"
+    },
+    "server": "./server.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "bb plugin build"
+  },
+  "dependencies": {
+    "@octokit/auth-app": "8.3.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.104",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}
